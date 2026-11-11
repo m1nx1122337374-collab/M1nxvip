@@ -1,81 +1,65 @@
 import os
 import sys
-from flask import Flask, request, jsonify
 import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-SUPPORTED_REGIONS = {
-    'BD': 'Bangladesh',
-    'IN': 'India',
-    'SG': 'Singapore',
-    'MY': 'Malaysia',
-    'ID': 'Indonesia',
-    'PK': 'Pakistan',
-    'MA': 'Middle East (MENA)',
-    'BR': 'Brazil',
-    'TH': 'Thailand',
-    'VN': 'Vietnam'
-}
+# থার্ড-পার্টি ওয়ার্কিং এপিআই
+EXTERNAL_API = "https://jexarcodexplayer.vercel.app/ffinfo"
 
-def check_player_info(target_id, requested_region=None):
+# অটো-ডিটেক্ট করার জন্য রিজিওনের প্রাইওরিটি লিস্ট (BD এবং IND প্রথমে রাখা হয়েছে)
+REGIONS_TO_TRY = ['BD', 'IND', 'SG', 'BR', 'US', 'PK', 'ID', 'TH']
+
+def fetch_player_auto(uid, requested_region=None):
+    # ইউজার যদি ম্যানুয়ালি রিজিওন দিয়ে দেয় তবে শুধু সেটাই ট্রাই করবে
     if requested_region:
-        regions_to_test = [requested_region.upper()]
+        testing_regions = [requested_region.upper()]
     else:
-        regions_to_test = ['BD', 'IN', 'SG', 'MA', 'PK', 'BR']
+        # রিজিওন না দিলে অটোমেটিক লুপ চালিয়ে খুজে বের করবে
+        testing_regions = REGIONS_TO_TRY
 
-    for r_code in regions_to_test:
-        if r_code not in SUPPORTED_REGIONS:
-            continue
-            
-        print(f"🔍 Testing region {r_code} ({SUPPORTED_REGIONS[r_code]}) for UID: {target_id}...", flush=True)
-        
-        # ফ্রেশ এবং ডায়নামিক হেডারের ব্যবস্থা
-        headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive',
-            'Origin': 'https://shop2game.com',
-            'Referer': f'https://shop2game.com/app/100067/idlogin',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'content-type': 'application/json',
-        }
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
 
-        json_data = {
-            'app_id': 100067,
-            'login_id': target_id,
-            'app_server_id': 0,
+    for region in testing_regions:
+        params = {
+            'uid': uid,
+            'region': region
         }
 
         try:
-            # কুকিজের ঝামেলা এড়াতে সেশন রিকোয়েস্ট ব্যবহার করা ভালো
-            session = requests.Session()
-            res = session.post(
-                'https://shop2game.com/api/auth/player_id_login', 
-                headers=headers, 
-                json=json_data,
-                timeout=10
-            )
-
-            print(f"Response Code: {res.status_code}, Body: {res.text}", flush=True)
-
-            if res.status_code == 200:
-                data = res.json()
-                if data.get('nickname'):
-                    nickname = data.get('nickname', 'N/A')
-                    print(f"✅ Player found in region {r_code}! Nickname: {nickname}", flush=True)
-                    return {
-                        "nickname": nickname,
-                        "region_code": r_code,
-                        "region_name": SUPPORTED_REGIONS[r_code]
-                    }
+            response = requests.get(EXTERNAL_API, params=params, headers=headers, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
                 
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ Error during request for region {r_code}: {str(e)}", flush=True)
-            if requested_region:
-                return {"error": str(e)}
+                # সফলভাবে প্লেয়ারের তথ্য পাওয়া গেলে সাথে সাথে রেসপন্স রিটার্ন করবে
+                if data.get("status") == "success" and "account" in data:
+                    account = data.get("account", {})
+                    
+                    return {
+                        "status": "success",
+                        "nickname": account.get("name", "N/A"),
+                        "uid": account.get("uid", uid),
+                        "detected_region": region,
+                        "level": account.get("level", "N/A"),
+                        "exp": account.get("exp", "N/A"),
+                        "likes": account.get("likes", "N/A"),
+                        "br_rank": account.get("br_rank", "N/A"),
+                        "cs_rank": account.get("cs_rank", "N/A"),
+                        "account_created": account.get("account_created", "N/A"),
+                        "last_login": account.get("last_login", "N/A"),
+                        "bio": account.get("bio", "N/A"),
+                        "guild": data.get("guild", {}),
+                        "raw_data": data
+                    }, 200
 
-    return {"error": "ID NOT FOUND IN SUPPORTED REGIONS"}
+        except requests.exceptions.RequestException:
+            continue # কোনো রিজিওনে টাইমআউট বা এরর আসলে পরের রিজিওন চেক করবে
+
+    return {"error": "Player UID not found in any supported region"}, 404
 
 @app.route('/', methods=['GET'])
 def home_region_info():
@@ -85,11 +69,8 @@ def home_region_info():
     if not uid:
         return jsonify({"error": "UID parameter is required"}), 400
 
-    result = check_player_info(uid, region)
-    if "error" in result:
-        return jsonify(result), 404
-
-    return jsonify(result)
+    result, status_code = fetch_player_auto(uid, region)
+    return jsonify(result), status_code
 
 @app.route('/xp-opu', methods=['GET'])
 def get_region_info():
@@ -99,11 +80,8 @@ def get_region_info():
     if not uid:
         return jsonify({"error": "UID parameter is required"}), 400
 
-    result = check_player_info(uid, region)
-    if "error" in result:
-        return jsonify(result), 404
-
-    return jsonify(result)
+    result, status_code = fetch_player_auto(uid, region)
+    return jsonify(result), status_code
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
